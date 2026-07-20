@@ -1,0 +1,10 @@
+.cache/
+.tmp/
+.env
+.env.*
+*.env
+*.key
+*.pem
+*.tgz
+*.tar
+nofeel-k8s/
