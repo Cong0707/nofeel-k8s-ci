@@ -2,9 +2,8 @@
 set -Eeuo pipefail
 
 readonly SOURCE_ROOT="/root/kubenetes/nofeel-k8s"
-readonly SOURCE_REMOTE="git@github.com:NoFeelCaptcha/nofeel-k8s.git"
-readonly SOURCE_KEY="/root/.ssh/nofeel-k8s-readonly"
-readonly SOURCE_KNOWN_HOSTS="/root/.ssh/known_hosts"
+readonly SOURCE_REMOTE="https://github.com/NoFeelCaptcha/nofeel-k8s.git"
+readonly SOURCE_CREDENTIAL="/root/.config/nofeel-ci/git-credentials"
 readonly POLICY_ROOT="/root/kubenetes/nofeel-k8s-ci"
 readonly POLICY_REMOTE="https://github.com/Cong0707/nofeel-k8s-ci.git"
 readonly KUBECTL="/usr/bin/kubectl"
@@ -15,9 +14,9 @@ readonly GENERATED_ROOT="${SOURCE_ROOT}/ci/generated"
 [[ "${EUID}" -eq 0 ]] || { echo 'must run as root' >&2; exit 1; }
 [[ -d "${SOURCE_ROOT}/.git" ]] || { echo 'trusted nofeel-k8s checkout is missing' >&2; exit 1; }
 [[ -d "${POLICY_ROOT}/.git" ]] || { echo 'trusted nofeel-k8s-ci checkout is missing' >&2; exit 1; }
-[[ -s "${SOURCE_KEY}" && -s "${SOURCE_KNOWN_HOSTS}" ]] || { echo 'read-only GitHub deploy key is missing' >&2; exit 1; }
+[[ -s "${SOURCE_CREDENTIAL}" ]] || { echo 'read-only GitHub credential is missing' >&2; exit 1; }
 [[ -x "${KUBECTL}" && -x "${GIT}" ]] || { echo 'kubectl or git is missing' >&2; exit 1; }
-export GIT_SSH_COMMAND="/usr/bin/ssh -i ${SOURCE_KEY} -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=${SOURCE_KNOWN_HOSTS}"
+export GIT_TERMINAL_PROMPT=0
 
 exec 9>"${LOCK_FILE}"
 /usr/bin/flock -n 9 || { echo 'another deployment is already running' >&2; exit 75; }
@@ -66,7 +65,7 @@ locked_source="$(${GIT} -C "${POLICY_ROOT}" show refs/remotes/origin/main:config
   exit 1
 }
 ${GIT} -C "${SOURCE_ROOT}" remote set-url origin "${SOURCE_REMOTE}"
-${GIT} -C "${SOURCE_ROOT}" fetch --quiet origin main
+${GIT} -c credential.helper="store --file=${SOURCE_CREDENTIAL}" -C "${SOURCE_ROOT}" fetch --quiet origin main
 if ! ${GIT} -C "${SOURCE_ROOT}" merge-base --is-ancestor "${source_commit}" refs/remotes/origin/main; then
   echo 'source commit is not an ancestor of protected origin/main' >&2
   exit 1

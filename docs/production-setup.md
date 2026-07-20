@@ -8,7 +8,7 @@
 - `main` requires Pull Request review and CODEOWNER approval.
 - `production` Environment accepts deployments from `main` only.
 - `ALLOWED_TRIGGER_ACTORS` contains only the accounts that may start a manual run.
-- Default `GITHUB_TOKEN` is read-only; GHCR push uses a dedicated Environment Secret.
+- Workflow `GITHUB_TOKEN` has only `contents: read` and `packages: write`; it pushes personal GHCR images.
 - `NOFEEL_REPOSITORIES_TOKEN` is read-only and limited to the required NoFeel repositories.
 
 ## OVH SSH boundary
@@ -22,7 +22,7 @@
 
 ## Source and image boundary
 
-- The server-side checkout uses a read-only Deploy Key.
+- The server-side checkout uses a root-only fine-grained read credential because organization policy disables Deploy Keys.
 - The server fetches protected CI `main`; the requested source commit must exactly match its lock file.
 - The helper never executes scripts received from GitHub Actions.
 - Generated overlays are temporary and are removed after every run.
