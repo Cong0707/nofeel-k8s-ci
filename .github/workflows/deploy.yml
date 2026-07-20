@@ -3,11 +3,6 @@ name: NoFeelCaptcha production deploy
 on:
   workflow_dispatch:
     inputs:
-      nofeel_ref:
-        description: Git ref or commit of NoFeelCaptcha/nofeel-k8s to deploy
-        required: true
-        default: main
-        type: string
       confirm_production:
         description: Confirm that this run may build and update production
         required: true
@@ -16,7 +11,7 @@ on:
 
 permissions:
   contents: read
-  packages: write
+  packages: read
 
 concurrency:
   group: nofeel-production-deploy
@@ -24,15 +19,39 @@ concurrency:
 
 env:
   REGISTRY: ghcr.io
-  IMAGE_NAMESPACE: nofeelcaptcha
+  IMAGE_NAMESPACE: cong0707
 
 jobs:
   build-and-deploy:
     name: Build, publish and roll out NoFeelCaptcha
+    if: ${{ github.ref == 'refs/heads/main' }}
     runs-on: ubuntu-24.04
     environment: production
     timeout-minutes: 120
     steps:
+      - name: Validate manual trigger policy
+        shell: bash
+        env:
+          ACTOR: ${{ github.actor }}
+          OWNER: ${{ github.repository_owner }}
+          ALLOWED_TRIGGER_ACTORS: ${{ vars.ALLOWED_TRIGGER_ACTORS }}
+        run: |
+          set -euo pipefail
+          allowed_list="${OWNER},${ALLOWED_TRIGGER_ACTORS:-}"
+          allowed=0
+          IFS=',' read -r -a actors <<< "${allowed_list}"
+          for candidate in "${actors[@]}"; do
+            candidate="${candidate//[[:space:]]/}"
+            if [[ -n "${candidate}" && "${candidate,,}" == "${ACTOR,,}" ]]; then
+              allowed=1
+              break
+            fi
+          done
+          if (( allowed != 1 )); then
+            echo "actor ${ACTOR} is not allowed to trigger production" >&2
+            exit 1
+          fi
+
       - name: Require explicit production confirmation
         if: ${{ inputs.confirm_production != true }}
         shell: bash
@@ -45,16 +64,26 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Read locked source commit
+        id: lock
+        shell: bash
+        run: |
+          set -euo pipefail
+          source_commit="$(sed -n 's/^commit: //p' config/nofeel-k8s.lock)"
+          [[ "${source_commit}" =~ ^[0-9a-f]{40}$ ]]
+          printf 'source_commit=%s\n' "${source_commit}" >> "${GITHUB_OUTPUT}"
+
       - name: Checkout nofeel-k8s source
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           repository: NoFeelCaptcha/nofeel-k8s
-          ref: ${{ inputs.nofeel_ref }}
+          ref: ${{ steps.lock.outputs.source_commit }}
+          token: ${{ secrets.NOFEEL_REPOSITORIES_TOKEN || github.token }}
           path: nofeel-k8s
           persist-credentials: false
 
       - name: Read locked component commits
-        id: lock
+        id: components
         working-directory: nofeel-k8s
         shell: bash
         run: |
@@ -76,8 +105,8 @@ jobs:
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           repository: NoFeelCaptcha/nofeel-server
-          ref: ${{ steps.lock.outputs.server_commit }}
-          token: ${{ secrets.NOFEEL_COMPONENTS_TOKEN || github.token }}
+          ref: ${{ steps.components.outputs.server_commit }}
+          token: ${{ secrets.NOFEEL_REPOSITORIES_TOKEN || github.token }}
           path: nofeel-k8s/.tools/components/nofeel-server
           persist-credentials: false
 
@@ -85,8 +114,8 @@ jobs:
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           repository: NoFeelCaptcha/nofeel-browser
-          ref: ${{ steps.lock.outputs.browser_commit }}
-          token: ${{ secrets.NOFEEL_COMPONENTS_TOKEN || github.token }}
+          ref: ${{ steps.components.outputs.browser_commit }}
+          token: ${{ secrets.NOFEEL_REPOSITORIES_TOKEN || github.token }}
           path: nofeel-k8s/.tools/components/nofeel-browser
           persist-credentials: false
 
@@ -94,8 +123,8 @@ jobs:
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           repository: NoFeelCaptcha/nofeel-frontend
-          ref: ${{ steps.lock.outputs.frontend_commit }}
-          token: ${{ secrets.NOFEEL_COMPONENTS_TOKEN || github.token }}
+          ref: ${{ steps.components.outputs.frontend_commit }}
+          token: ${{ secrets.NOFEEL_REPOSITORIES_TOKEN || github.token }}
           path: nofeel-k8s/.tools/components/nofeel-frontend
           persist-credentials: false
 
@@ -108,8 +137,8 @@ jobs:
       - name: Login to GHCR
         shell: bash
         env:
-          REGISTRY_USERNAME: ${{ secrets.GHCR_WRITE_USERNAME || github.actor }}
-          REGISTRY_TOKEN: ${{ secrets.GHCR_WRITE_TOKEN || github.token }}
+          REGISTRY_USERNAME: ${{ secrets.GHCR_WRITE_USERNAME }}
+          REGISTRY_TOKEN: ${{ secrets.GHCR_WRITE_TOKEN }}
         run: |
           set -euo pipefail
           echo "$REGISTRY_TOKEN" | docker login "$REGISTRY" --username "$REGISTRY_USERNAME" --password-stdin
@@ -123,20 +152,16 @@ jobs:
           IMAGE_NAMESPACE: ${{ env.IMAGE_NAMESPACE }}
         run: bash scripts/build-and-push.sh
 
-      - name: Generate digest-pinned production overlays
+      - name: Generate release manifest
         shell: bash
         env:
-          NOFEEL_ROOT: ${{ github.workspace }}/nofeel-k8s
-          IMAGE_RUNTIME: ${{ steps.images.outputs.runtime }}
-          IMAGE_SERVER: ${{ steps.images.outputs.server }}
-          IMAGE_FRONTEND: ${{ steps.images.outputs.frontend }}
+          SOURCE_COMMIT: ${{ steps.images.outputs.source_commit }}
+          SERVER_IMAGE: ${{ steps.images.outputs.server }}
+          RUNTIME_IMAGE: ${{ steps.images.outputs.runtime }}
+          FRONTEND_IMAGE: ${{ steps.images.outputs.frontend }}
         run: |
-          bash scripts/render-production.sh
-          cp scripts/deploy-remote.sh nofeel-k8s/ci/generated/deploy-remote.sh
-          chmod 0755 nofeel-k8s/ci/generated/deploy-remote.sh
-          tar --sort=name --mtime='UTC 1970-01-01' --owner=0 --group=0 --numeric-owner \
-            --exclude=.git --exclude=.tools --exclude=.cache \
-            -czf "$RUNNER_TEMP/nofeel-deploy.tgz" -C nofeel-k8s .
+          bash scripts/make-release-manifest.sh > "$RUNNER_TEMP/nofeel-release.env"
+          cat "$RUNNER_TEMP/nofeel-release.env"
 
       - name: Configure pinned SSH trust
         shell: bash
@@ -152,56 +177,24 @@ jobs:
           printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > "$HOME/.ssh/known_hosts"
           chmod 0600 "$HOME/.ssh/id_ed25519" "$HOME/.ssh/known_hosts"
 
-      - name: Upload release bundle and registry credentials
+      - name: Send release manifest through forced command
         shell: bash
         env:
           DEPLOY_HOST: ${{ vars.DEPLOY_HOST }}
           DEPLOY_USER: ${{ vars.DEPLOY_USER || 'root' }}
-          GHCR_PULL_USERNAME: ${{ secrets.GHCR_PULL_USERNAME }}
-          GHCR_PULL_TOKEN: ${{ secrets.GHCR_PULL_TOKEN }}
         run: |
           set -euo pipefail
           test -n "$DEPLOY_HOST"
-          test -n "$GHCR_PULL_USERNAME"
-          test -n "$GHCR_PULL_TOKEN"
-          release_id="${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-          remote_base="/root/kubenetes/nofeel-ci-${release_id}"
-          printf 'GHCR_PULL_USERNAME=%q\nGHCR_PULL_TOKEN=%q\n' \
-            "$GHCR_PULL_USERNAME" "$GHCR_PULL_TOKEN" > "$RUNNER_TEMP/registry.env"
-          scp -q -o StrictHostKeyChecking=yes \
-            "$RUNNER_TEMP/nofeel-deploy.tgz" \
-            "$DEPLOY_USER@$DEPLOY_HOST:${remote_base}.tgz"
-          scp -q -o StrictHostKeyChecking=yes \
-            "$RUNNER_TEMP/registry.env" \
-            "$DEPLOY_USER@$DEPLOY_HOST:${remote_base}.env"
+          test "$DEPLOY_USER" = root
+          ssh -T -o StrictHostKeyChecking=yes -o IdentitiesOnly=yes \
+            -o ConnectTimeout=10 -o ServerAliveInterval=15 -o ServerAliveCountMax=2 \
+            "$DEPLOY_USER@$DEPLOY_HOST" < "$RUNNER_TEMP/nofeel-release.env"
+          rm -f "$RUNNER_TEMP/nofeel-release.env"
 
-      - name: Apply state, migrate and roll out
-        shell: bash
-        env:
-          DEPLOY_HOST: ${{ vars.DEPLOY_HOST }}
-          DEPLOY_USER: ${{ vars.DEPLOY_USER || 'root' }}
-        run: |
-          set -euo pipefail
-          release_id="${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-          remote_base="/root/kubenetes/nofeel-ci-${release_id}"
-          ssh -o StrictHostKeyChecking=yes "$DEPLOY_USER@$DEPLOY_HOST" \
-            "set -e; install -d -m 0700 '${remote_base}'; tar -xzf '${remote_base}.tgz' -C '${remote_base}'; chmod 0755 '${remote_base}/ci/generated/deploy-remote.sh'; '${remote_base}/ci/generated/deploy-remote.sh' '${remote_base}' '${remote_base}.env'"
-
-      - name: Cleanup remote and runner temporary files
+      - name: Cleanup runner temporary files
         if: ${{ always() }}
         shell: bash
-        env:
-          DEPLOY_HOST: ${{ vars.DEPLOY_HOST }}
-          DEPLOY_USER: ${{ vars.DEPLOY_USER || 'root' }}
-        run: |
-          set +e
-          release_id="${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-          remote_base="/root/kubenetes/nofeel-ci-${release_id}"
-          if [[ -n "${DEPLOY_HOST}" ]]; then
-            ssh -o StrictHostKeyChecking=yes "$DEPLOY_USER@$DEPLOY_HOST" \
-              "rm -rf '${remote_base}' '${remote_base}.tgz' '${remote_base}.env'" || true
-          fi
-          rm -f "$RUNNER_TEMP/nofeel-deploy.tgz" "$RUNNER_TEMP/registry.env"
+        run: rm -f "$RUNNER_TEMP/nofeel-release.env"
 
       - name: Write deployment summary
         if: ${{ success() }}
@@ -210,7 +203,7 @@ jobs:
           cat >> "$GITHUB_STEP_SUMMARY" <<EOF
           ## NoFeelCaptcha deployment completed
 
-          - Source ref: `${{ inputs.nofeel_ref }}`
+          - Locked source commit: `${{ steps.lock.outputs.source_commit }}`
           - Source commit: `${{ steps.images.outputs.source_commit }}`
           - Image tag: `${{ steps.images.outputs.tag }}`
           - Runtime: `${{ steps.images.outputs.runtime }}`

@@ -1,0 +1,174 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+readonly SOURCE_ROOT="/root/kubenetes/nofeel-k8s"
+readonly SOURCE_REMOTE="git@github.com:NoFeelCaptcha/nofeel-k8s.git"
+readonly SOURCE_KEY="/root/.ssh/nofeel-k8s-readonly"
+readonly SOURCE_KNOWN_HOSTS="/root/.ssh/known_hosts"
+readonly POLICY_ROOT="/root/kubenetes/nofeel-k8s-ci"
+readonly POLICY_REMOTE="https://github.com/Cong0707/nofeel-k8s-ci.git"
+readonly KUBECTL="/usr/bin/kubectl"
+readonly GIT="/usr/bin/git"
+readonly LOCK_FILE="/run/nofeel-ci-deploy.lock"
+readonly GENERATED_ROOT="${SOURCE_ROOT}/ci/generated"
+
+[[ "${EUID}" -eq 0 ]] || { echo 'must run as root' >&2; exit 1; }
+[[ -d "${SOURCE_ROOT}/.git" ]] || { echo 'trusted nofeel-k8s checkout is missing' >&2; exit 1; }
+[[ -d "${POLICY_ROOT}/.git" ]] || { echo 'trusted nofeel-k8s-ci checkout is missing' >&2; exit 1; }
+[[ -s "${SOURCE_KEY}" && -s "${SOURCE_KNOWN_HOSTS}" ]] || { echo 'read-only GitHub deploy key is missing' >&2; exit 1; }
+[[ -x "${KUBECTL}" && -x "${GIT}" ]] || { echo 'kubectl or git is missing' >&2; exit 1; }
+export GIT_SSH_COMMAND="/usr/bin/ssh -i ${SOURCE_KEY} -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=${SOURCE_KNOWN_HOSTS}"
+
+exec 9>"${LOCK_FILE}"
+/usr/bin/flock -n 9 || { echo 'another deployment is already running' >&2; exit 75; }
+
+declare -A values=()
+while IFS= read -r line; do
+  [[ -n "${line}" ]] || continue
+  [[ "${line}" == *=* ]] || { echo 'invalid release manifest line' >&2; exit 2; }
+  key="${line%%=*}"
+  value="${line#*=}"
+  case "${key}" in
+    version|source_commit|server_image|runtime_image|frontend_image) ;;
+    *) echo 'unknown release manifest key' >&2; exit 2 ;;
+  esac
+  [[ -z "${values[${key}]+set}" ]] || { echo 'duplicate release manifest key' >&2; exit 2; }
+  values["${key}"]="${value}"
+done
+
+[[ "${values[version]:-}" == 1 ]] || { echo 'unsupported release manifest version' >&2; exit 2; }
+source_commit="${values[source_commit]:-}"
+server_image="${values[server_image]:-}"
+runtime_image="${values[runtime_image]:-}"
+frontend_image="${values[frontend_image]:-}"
+[[ "${source_commit}" =~ ^[0-9a-f]{40}$ ]] || { echo 'invalid source commit' >&2; exit 2; }
+[[ "${server_image}" =~ ^ghcr\.io/cong0707/nofeel-server@sha256:[0-9a-f]{64}$ ]] || { echo 'invalid server image' >&2; exit 2; }
+[[ "${runtime_image}" =~ ^ghcr\.io/cong0707/nofeel-runtime@sha256:[0-9a-f]{64}$ ]] || { echo 'invalid runtime image' >&2; exit 2; }
+[[ "${frontend_image}" =~ ^ghcr\.io/cong0707/nofeel-frontend@sha256:[0-9a-f]{64}$ ]] || { echo 'invalid frontend image' >&2; exit 2; }
+
+[[ -z "$(${GIT} -C "${POLICY_ROOT}" status --porcelain)" ]] || {
+  echo 'trusted nofeel-k8s-ci checkout is dirty' >&2
+  exit 1
+}
+${GIT} -C "${POLICY_ROOT}" remote set-url origin "${POLICY_REMOTE}"
+${GIT} -C "${POLICY_ROOT}" fetch --quiet origin main
+locked_source="$(${GIT} -C "${POLICY_ROOT}" show refs/remotes/origin/main:config/nofeel-k8s.lock | /usr/bin/sed -n 's/^commit: //p')"
+[[ "${locked_source}" =~ ^[0-9a-f]{40}$ ]] || { echo 'invalid production source lock' >&2; exit 1; }
+[[ "${source_commit}" == "${locked_source}" ]] || { echo 'source commit does not match protected production lock' >&2; exit 1; }
+
+"${KUBECTL}" -n nofeel get secret nofeel-ghcr >/dev/null || {
+  echo 'secret/nofeel-ghcr is missing; configure it once on the cluster' >&2
+  exit 1
+}
+
+[[ -z "$(${GIT} -C "${SOURCE_ROOT}" status --porcelain)" ]] || {
+  echo 'trusted nofeel-k8s checkout is dirty' >&2
+  exit 1
+}
+${GIT} -C "${SOURCE_ROOT}" remote set-url origin "${SOURCE_REMOTE}"
+${GIT} -C "${SOURCE_ROOT}" fetch --quiet origin main
+if ! ${GIT} -C "${SOURCE_ROOT}" merge-base --is-ancestor "${source_commit}" refs/remotes/origin/main; then
+  echo 'source commit is not an ancestor of protected origin/main' >&2
+  exit 1
+fi
+${GIT} -C "${SOURCE_ROOT}" checkout --detach --force "${source_commit}" >/dev/null
+
+if ${GIT} -C "${SOURCE_ROOT}" ls-files --error-unmatch ci/generated >/dev/null 2>&1; then
+  echo 'ci/generated is tracked in the trusted source repository' >&2
+  exit 1
+fi
+rm -rf "${GENERATED_ROOT}"
+cleanup_and_rollback() {
+  status=$?
+  if (( status != 0 && rollout_started == 1 )); then
+    echo 'deployment failed; restoring previous application revisions' >&2
+    for deployment in nofeel-api nofeel-worker nofeel-frontend; do
+      "${KUBECTL}" -n nofeel rollout undo "deployment/${deployment}" >/dev/null 2>&1 || true
+    done
+    for deployment in nofeel-api nofeel-worker nofeel-frontend; do
+      "${KUBECTL}" -n nofeel rollout status "deployment/${deployment}" --timeout=300s >/dev/null 2>&1 || true
+    done
+  fi
+  rm -rf "${GENERATED_ROOT}"
+  exit "${status}"
+}
+rollout_started=0
+trap cleanup_and_rollback EXIT
+
+readonly APP_DIR="${GENERATED_ROOT}/production/app"
+readonly MIGRATE_DIR="${GENERATED_ROOT}/production/migrate"
+mkdir -p "${APP_DIR}" "${MIGRATE_DIR}"
+cp "${SOURCE_ROOT}/kustomize/overlays/production/app/config-patch.yaml" "${APP_DIR}/config-patch.yaml"
+cp "${SOURCE_ROOT}/kustomize/overlays/production/migrate/config-patch.yaml" "${MIGRATE_DIR}/config-patch.yaml"
+
+cat > "${APP_DIR}/kustomization.yaml" <<EOF
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../../../../kustomize/base/app
+patches:
+  - path: config-patch.yaml
+  - path: image-pull-secret-patch.yaml
+images:
+  - name: nofeel-runtime
+    newName: ${runtime_image%@*}
+    digest: ${runtime_image##*@}
+  - name: nofeel-server
+    newName: ${server_image%@*}
+    digest: ${server_image##*@}
+  - name: nofeel-frontend
+    newName: ${frontend_image%@*}
+    digest: ${frontend_image##*@}
+EOF
+
+cat > "${MIGRATE_DIR}/kustomization.yaml" <<EOF
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../../../../kustomize/base/migrate
+patches:
+  - path: config-patch.yaml
+  - path: image-pull-secret-patch.yaml
+images:
+  - name: nofeel-server
+    newName: ${server_image%@*}
+    digest: ${server_image##*@}
+EOF
+
+cat > "${APP_DIR}/image-pull-secret-patch.yaml" <<'EOF'
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: nofeel
+  namespace: nofeel
+imagePullSecrets:
+  - name: nofeel-ghcr
+EOF
+cp "${APP_DIR}/image-pull-secret-patch.yaml" "${MIGRATE_DIR}/image-pull-secret-patch.yaml"
+
+"${KUBECTL}" kustomize "${APP_DIR}" >/dev/null
+"${KUBECTL}" kustomize "${MIGRATE_DIR}" >/dev/null
+"${KUBECTL}" apply -k "${SOURCE_ROOT}/kustomize/overlays/production/state"
+"${KUBECTL}" -n nofeel rollout status statefulset/nofeel-redis-ha --timeout=900s
+"${KUBECTL}" -n nofeel rollout status deployment/nofeel-redis-proxy --timeout=600s
+
+for selector in \
+  'postgres-operator.crunchydata.com/cluster=nofeel-postgres,postgres-operator.crunchydata.com/data=postgres' \
+  'postgres-operator.crunchydata.com/cluster=nofeel-postgres,postgres-operator.crunchydata.com/role=pgbouncer' \
+  'postgres-operator.crunchydata.com/cluster=nofeel-postgres,postgres-operator.crunchydata.com/data=pgbackrest'; do
+  "${KUBECTL}" -n nofeel wait --for=condition=Ready pod -l "${selector}" --timeout=900s
+done
+
+"${KUBECTL}" -n nofeel delete job nofeel-migrate --ignore-not-found=true --wait=true
+"${KUBECTL}" apply -k "${MIGRATE_DIR}"
+"${KUBECTL}" -n nofeel wait --for=condition=complete job/nofeel-migrate --timeout=600s
+
+"${KUBECTL}" apply -k "${APP_DIR}"
+rollout_started=1
+for deployment in nofeel-api nofeel-worker nofeel-frontend; do
+  "${KUBECTL}" -n nofeel rollout status "deployment/${deployment}" --timeout=900s
+done
+
+"${KUBECTL}" -n nofeel get deployment nofeel-api nofeel-worker nofeel-frontend \
+  -o custom-columns=NAME:.metadata.name,READY:.status.readyReplicas,DESIRED:.spec.replicas,UPDATED:.status.updatedReplicas
+echo 'NoFeelCaptcha production rollout completed'

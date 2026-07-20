@@ -1,38 +1,45 @@
-# Production Setup Checklist
+# Production Security Checklist
 
-## Repository
+## GitHub
 
-1. Create `NoFeelCaptcha/nofeel-k8s-ci` as a public repository.
-2. Set the default branch to `main`.
-3. Add the workflow environment named `production`.
-4. Add at least one required reviewer to that environment before allowing a run.
+- Repository: `Cong0707/nofeel-k8s-ci`, public.
+- Trigger: `workflow_dispatch` only.
+- Source: `config/nofeel-k8s.lock`; no workflow input can select an arbitrary source ref.
+- `main` requires Pull Request review and CODEOWNER approval.
+- `production` Environment accepts deployments from `main` only.
+- `ALLOWED_TRIGGER_ACTORS` contains only the accounts that may start a manual run.
+- Default `GITHUB_TOKEN` is read-only; GHCR push uses a dedicated Environment Secret.
+- `NOFEEL_REPOSITORIES_TOKEN` is read-only and limited to the required NoFeel repositories.
 
-## Tokens
+## OVH SSH boundary
 
-Use separate credentials for separate boundaries:
+- Existing account: `root`.
+- CI uses a separate public key entry with `restrict`, `no-user-rc`, and a fixed
+  `/usr/local/sbin/nofeel-ci-gateway` forced command.
+- The CI key cannot request a PTY, execute a command, use forwarding, or use scp/sftp.
+- The gateway accepts at most 8192 bytes from standard input.
+- The deployment helper is root-owned and reads only the fixed five-field manifest.
 
-- component checkout: read-only GitHub token;
-- GHCR push: `write:packages` token or the repository `GITHUB_TOKEN`;
-- cluster pull: read-only `read:packages` token;
-- deploy transport: SSH key restricted to the OVH deployment account.
+## Source and image boundary
 
-Do not put a kubeconfig in the repository or in a workflow input. The workflow uses
-the kubeconfig already present on OVH at `/etc/kubernetes/admin.conf`.
+- The server-side checkout uses a read-only Deploy Key.
+- The server fetches protected CI `main`; the requested source commit must exactly match its lock file.
+- The helper never executes scripts received from GitHub Actions.
+- Generated overlays are temporary and are removed after every run.
+- Only `ghcr.io/cong0707/*@sha256:<digest>` images are accepted.
+- The cluster pull token lives only in `secret/nofeel-ghcr`.
 
-## First dry run
+## Verification
 
-Before using production credentials, run the scripts locally with a disposable
-registry and inspect the generated overlays:
+Before the first production run, verify:
 
-```bash
-export NOFEEL_ROOT=/path/to/nofeel-k8s
-export IMAGE_RUNTIME=ghcr.io/nofeelcaptcha/nofeel-runtime@sha256:<64-hex>
-export IMAGE_SERVER=ghcr.io/nofeelcaptcha/nofeel-server@sha256:<64-hex>
-export IMAGE_FRONTEND=ghcr.io/nofeelcaptcha/nofeel-frontend@sha256:<64-hex>
-bash scripts/render-production.sh
-kubectl kustomize "$NOFEEL_ROOT/ci/generated/production/app"
-kubectl kustomize "$NOFEEL_ROOT/ci/generated/production/migrate"
+```text
+lock file contains the intended nofeel-k8s commit
+invalid protocol manifest is rejected
+remote command execution is rejected
+local and remote port forwarding are rejected
+nofeel-ghcr exists in namespace nofeel
+OVH can fetch nofeel-k8s with the read-only Deploy Key
+Environment secrets are present
+production Environment is restricted to main
 ```
-
-The generated files are intentionally temporary and are not committed to either
-repository.

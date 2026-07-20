@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+readonly REQUEST_DIR="/run/nofeel-ci"
+readonly MAX_REQUEST_BYTES=8192
+readonly REQUEST_TIMEOUT=20
+
+reject() {
+  /usr/bin/logger -t nofeel-ci-gateway "rejected deployment transport from ${SSH_CONNECTION:-unknown}"
+  exit 126
+}
+
+[[ -z "${SSH_ORIGINAL_COMMAND:-}" ]] || reject
+[[ -z "${SSH_TTY:-}" ]] || reject
+[[ -d "${REQUEST_DIR}" ]] || reject
+
+request_file="$(/usr/bin/mktemp "${REQUEST_DIR}/request.XXXXXX")" || reject
+trap '/usr/bin/rm -f "${request_file}"' EXIT
+/usr/bin/chmod 0600 "${request_file}"
+
+/usr/bin/timeout "${REQUEST_TIMEOUT}s" /usr/bin/head -c "$((MAX_REQUEST_BYTES + 1))" > "${request_file}" || reject
+request_bytes="$(/usr/bin/wc -c < "${request_file}")"
+(( request_bytes > 0 && request_bytes <= MAX_REQUEST_BYTES )) || reject
+
+/usr/bin/logger -t nofeel-ci-gateway "accepted deployment request from ${SSH_CONNECTION:-unknown}"
+exec /usr/local/sbin/nofeel-ci-deploy < "${request_file}"

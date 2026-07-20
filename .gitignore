@@ -1,5 +1,6 @@
 .cache/
 .tmp/
+.secrets/
 .env
 .env.*
 *.env
@@ -8,3 +9,5 @@
 *.tgz
 *.tar
 nofeel-k8s/
+nofeel-k8s-ci-deploy*
+id_*
