@@ -3,12 +3,15 @@
 ## GitHub
 
 - Repository: `Cong0707/nofeel-k8s-ci`, public.
-- Trigger: `workflow_dispatch` only.
+- Trigger: a newly opened deployment Issue only; comments and reopened Issues do not deploy.
+- `ALLOWED_TRIGGER_ACTORS` is parsed as an exact, case-insensitive comma-separated login list.
+- Accounts outside that list have their Issues closed before any environment or deployment Secret is available.
 - Source: `config/nofeel-k8s.lock`; no workflow input can select an arbitrary source ref.
 - `main` requires Pull Request review and CODEOWNER approval.
 - `production` Environment accepts deployments from `main` only.
 - `ALLOWED_TRIGGER_ACTORS` contains only the accounts that may start a manual run.
 - Workflow `GITHUB_TOKEN` has only `contents: read` and `packages: write`; it pushes personal GHCR images.
+- The authorization job has only `issues: write`; the production permissions and Environment are scoped to the deployment job.
 - `NOFEEL_REPOSITORIES_TOKEN` is read-only and limited to the required NoFeel repositories.
 
 ## OVH SSH boundary
