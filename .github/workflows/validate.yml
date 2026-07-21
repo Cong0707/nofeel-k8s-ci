@@ -40,4 +40,4 @@ jobs:
           test ! -e config/nofeel-k8s.lock
           grep -Fq 'needs.authorize.outputs.source_commit' .github/workflows/deploy.yml
           test ! -d server
-          ! grep -R -Fq 'nofeel-ci-gateway' README.md docs .github scripts
+          ! grep -R -Fq 'nofeel-ci-gateway' README.md docs scripts
