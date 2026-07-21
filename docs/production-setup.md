@@ -8,7 +8,7 @@
 - `ALLOWED_TRIGGER_ACTORS` is parsed as an exact, case-insensitive comma-separated login list.
 - Accounts outside that list have their Issues closed before any environment or deployment Secret is available.
 - Direct `workflow_dispatch` checks the event sender against the personal repository owner and does not use the partner allowlist.
-- Source: `config/nofeel-k8s.lock`; no workflow input can select an arbitrary source ref.
+- Source: a full `nofeel-k8s` commit entered through Issue or Actions; only commits on protected `main` are accepted.
 - `main` requires Pull Request review and CODEOWNER approval.
 - `production` Environment accepts deployments from `main` only.
 - `ALLOWED_TRIGGER_ACTORS` contains only the accounts that may start a manual run.
@@ -28,7 +28,7 @@
 ## Source and image boundary
 
 - The server-side checkout uses a root-only fine-grained read credential because organization policy disables Deploy Keys.
-- The server fetches protected CI `main`; the requested source commit must exactly match its lock file.
+- The server fetches the requested `nofeel-k8s` commit and verifies it is an ancestor of protected `main`.
 - The helper never executes scripts received from GitHub Actions.
 - Generated overlays are temporary and are removed after every run.
 - Only `ghcr.io/cong0707/*@sha256:<digest>` images are accepted.
@@ -39,7 +39,7 @@
 Before the first production run, verify:
 
 ```text
-lock file contains the intended nofeel-k8s commit
+requested nofeel-k8s commit is a 40-character hash on protected main
 invalid protocol manifest is rejected
 remote command execution is rejected
 local and remote port forwarding are rejected

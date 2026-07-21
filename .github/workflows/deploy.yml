@@ -11,6 +11,10 @@ on:
       - opened
   workflow_dispatch:
     inputs:
+      source_commit:
+        description: Full 40-character nofeel-k8s commit on main
+        required: true
+        type: string
       confirm_production:
         description: Confirm that this run may update production
         required: true
@@ -37,6 +41,7 @@ jobs:
       valid_request: ${{ steps.policy.outputs.valid_request }}
       trigger_actor: ${{ steps.policy.outputs.trigger_actor }}
       trigger_source: ${{ steps.policy.outputs.trigger_source }}
+      source_commit: ${{ steps.policy.outputs.source_commit }}
     steps:
       - name: Validate actor and deployment confirmation
         id: policy
@@ -70,10 +75,12 @@ jobs:
           set_output valid_request false
           set_output trigger_actor unknown
           set_output trigger_source unknown
+          set_output source_commit unknown
 
           if [[ "$GITHUB_EVENT_NAME" == workflow_dispatch ]]; then
             actor="$(jq -r '.sender.login // ""' "$GITHUB_EVENT_PATH")"
             confirmed="$(jq -r '(.inputs.confirm_production // false) | tostring' "$GITHUB_EVENT_PATH")"
+            source_commit="$(jq -r '.inputs.source_commit // ""' "$GITHUB_EVENT_PATH")"
             [[ "$actor" == "$GITHUB_REPOSITORY_OWNER" ]] || {
               echo "direct deployment is restricted to ${GITHUB_REPOSITORY_OWNER}" >&2
               exit 1
@@ -82,10 +89,16 @@ jobs:
               echo 'production confirmation is required' >&2
               exit 1
             }
+            [[ "$source_commit" =~ ^[0-9a-fA-F]{40}$ ]] || {
+              echo 'a full 40-character nofeel-k8s commit is required' >&2
+              exit 1
+            }
+            source_commit="${source_commit,,}"
             set_output authorized true
             set_output valid_request true
             set_output trigger_actor "$actor"
             set_output trigger_source "${GITHUB_REPOSITORY} direct workflow_dispatch"
+            set_output source_commit "$source_commit"
             exit 0
           fi
 
@@ -113,8 +126,8 @@ jobs:
           set_output authorized true
 
           expected_title='[Deploy] NoFeelCaptcha production'
-          expected_confirmation_lower='- [x] I confirm that this Issue may build and roll out the locked version to production.'
-          expected_confirmation_upper='- [X] I confirm that this Issue may build and roll out the locked version to production.'
+          expected_confirmation_lower='- [x] I confirm that this Issue may build and roll out the selected commit to production.'
+          expected_confirmation_upper='- [X] I confirm that this Issue may build and roll out the selected commit to production.'
           if [[ "$issue_title" != "$expected_title" ]] || \
              { ! grep -Fqx -- "$expected_confirmation_lower" <<< "$issue_body" && \
                ! grep -Fqx -- "$expected_confirmation_upper" <<< "$issue_body"; }; then
@@ -123,9 +136,21 @@ jobs:
             exit 0
           fi
 
+          source_commit="$(awk '
+            $0 == "### nofeel-k8s commit" { found=1; next }
+            found && NF { print; exit }
+          ' <<< "$issue_body")"
+          if [[ ! "$source_commit" =~ ^[0-9a-fA-F]{40}$ ]]; then
+            echo 'Closing an authorized issue with an invalid nofeel-k8s commit.'
+            close_issue not_planned
+            exit 0
+          fi
+          source_commit="${source_commit,,}"
+
           set_output valid_request true
           set_output trigger_actor "$actor"
           set_output trigger_source "${GITHUB_REPOSITORY} issue ${issue_number}"
+          set_output source_commit "$source_commit"
 
   build-and-deploy:
     name: Build, publish and roll out NoFeelCaptcha
@@ -150,23 +175,25 @@ jobs:
           ref: main
           persist-credentials: false
 
-      - name: Read locked source commit
-        id: lock
-        shell: bash
-        run: |
-          set -euo pipefail
-          source_commit="$(sed -n 's/^commit: //p' config/nofeel-k8s.lock)"
-          [[ "${source_commit}" =~ ^[0-9a-f]{40}$ ]]
-          printf 'source_commit=%s\n' "${source_commit}" >> "${GITHUB_OUTPUT}"
-
-      - name: Checkout nofeel-k8s source
+      - name: Checkout selected nofeel-k8s source
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           repository: NoFeelCaptcha/nofeel-k8s
-          ref: ${{ steps.lock.outputs.source_commit }}
+          ref: ${{ needs.authorize.outputs.source_commit }}
           token: ${{ secrets.NOFEEL_REPOSITORIES_TOKEN || github.token }}
           path: nofeel-k8s
           persist-credentials: false
+          fetch-depth: 0
+
+      - name: Require selected source on protected main
+        working-directory: nofeel-k8s
+        shell: bash
+        env:
+          SOURCE_COMMIT: ${{ needs.authorize.outputs.source_commit }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$SOURCE_COMMIT"
+          git merge-base --is-ancestor "$SOURCE_COMMIT" refs/remotes/origin/main
 
       - name: Read locked component commits
         id: components
@@ -204,6 +231,7 @@ jobs:
           token: ${{ secrets.NOFEEL_REPOSITORIES_TOKEN || github.token }}
           path: nofeel-k8s/.tools/components/nofeel-browser
           persist-credentials: false
+          submodules: recursive
 
       - name: Checkout locked frontend component
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -294,7 +322,7 @@ jobs:
 
           - Trigger source: `${TRIGGER_SOURCE}`
           - Triggered by: `${TRIGGER_ACTOR}`
-          - Locked source commit: `${{ steps.lock.outputs.source_commit }}`
+          - Requested source commit: `${{ needs.authorize.outputs.source_commit }}`
           - Source commit: `${{ steps.images.outputs.source_commit }}`
           - Image tag: `${{ steps.images.outputs.tag }}`
           - Runtime: `${{ steps.images.outputs.runtime }}`
