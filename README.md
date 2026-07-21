@@ -1,17 +1,23 @@
 # nofeel-k8s-ci
 
-`nofeel-k8s-ci` 是 NoFeelCaptcha 的公开 CI 仓库。白名单用户通过一次性部署
-Issue 手动触发：构建已经锁定的 `nofeel-k8s` 源码和组件，推送不可变 GHCR 镜像，
-然后通过 OVH 上的固定部署入口更新 Kubernetes。工作流完成后会写入结果并自动
-关闭该 Issue。
+`nofeel-k8s-ci` 是 NoFeelCaptcha 的受保护生产 CI 仓库。它提供两个手动入口：
+
+- 仓库所有者在本仓库 Actions 页面直接触发。
+- 合作方在 `NoFeelCaptcha/nofeel-k8s-ci` Actions 页面触发，由最小权限 GitHub App
+  转发到本仓库。
+
+两个入口最终都构建已经锁定的 `nofeel-k8s` 源码和组件，推送不可变 GHCR 镜像，
+然后通过 OVH 上的固定部署入口更新 Kubernetes。
 
 ## 部署边界
 
 仓库归 `Cong0707` 个人账号管理。生产工作流有以下固定边界：
 
-- 触发器只有新建 Issue，没有 `push`、`pull_request`、评论或定时任务。
-- 只有 `ALLOWED_TRIGGER_ACTORS` 中精确列出的 GitHub 用户名可以通过部署表单
-  启动生产 job；其他账号创建的 Issue 会直接关闭。
+- 触发器只有 `workflow_dispatch`，没有 `push`、`pull_request`、Issue 或定时任务。
+- 本仓库的直接入口只接受仓库所有者 `Cong0707`。
+- 远程入口只接受配置在 `REMOTE_DISPATCH_ACTOR` 中的专用 GitHub App 身份。
+- 远程入口会读取组织仓库真实 workflow run，并将其真实触发者与
+  `ALLOWED_TRIGGER_ACTORS` 做完整用户名匹配。
 - 授权门禁不使用 `production` Environment，也读取不到部署 Secret；只有门禁通过
   后的 job 才能使用生产 Environment。
 - 源码版本来自 `config/nofeel-k8s.lock`，触发时不能通过输入参数替换。
@@ -22,16 +28,16 @@ Issue 手动触发：构建已经锁定的 `nofeel-k8s` 源码和组件，推送
 - GitHub Actions 不持有 kubeconfig、数据库密码、GHCR 拉取 token 或 NoFeel 运行时
   Secret。
 
-合作方不需要成为仓库 Collaborator，也不需要 `Write` 权限。公开仓库允许其提交
-部署 Issue，工作流再用 `ALLOWED_TRIGGER_ACTORS` 做大小写不敏感的完整用户名
-匹配。Issue 不能选择源码分支、标签或 commit，每个新 Issue 只触发一次，重新打开
-或评论都不会重新部署。
+合作方不需要成为本仓库 Collaborator，也不需要本仓库 `Write` 权限。他们只需在
+组织触发仓库中拥有运行 Actions 所需的权限。组织仓库不能选择源码分支、标签或
+commit；远程来源参数也不能冒充真实触发者。同一个组织 workflow run 最多授权一个
+目标 workflow run。
 
 ## 工作流
 
 ```text
-打开并确认一次性部署 Issue
-  -> 校验 ALLOWED_TRIGGER_ACTORS 和固定表单
+本仓库所有者直接 Trigger，或组织仓库远程 Trigger
+  -> 校验入口身份、真实组织 run 和 ALLOWED_TRIGGER_ACTORS
   -> 锁定 commit
   -> checkout nofeel-k8s 与组件
   -> 验证 Kustomize 和构建输入
@@ -49,7 +55,7 @@ Issue 手动触发：构建已经锁定的 `nofeel-k8s` 源码和组件，推送
 ## 一次性配置
 
 以下命令按顺序执行。命令中的 `REPLACE_*` 只替换为你自己的值。私钥和 token
-不要写入仓库、Issue、聊天记录或日志。
+不要写入仓库、Actions input、聊天记录或日志。
 
 ### 1. 生成 CI 专用 SSH key
 
@@ -176,13 +182,14 @@ Secrets：
 
 | 名称 | 值 |
 | --- | --- |
-| `ALLOWED_TRIGGER_ACTORS` | 允许创建部署 Issue 的完整 GitHub 用户名，逗号分隔；例如 `Cong0707,partner-login` |
+| `ALLOWED_TRIGGER_ACTORS` | 允许从组织仓库触发的完整 GitHub 用户名，逗号分隔；例如 `Cong0707,partner-login` |
+| `REMOTE_DISPATCH_ACTOR` | 专用 GitHub App 的 bot login，例如 `nofeel-production-dispatch[bot]` |
 
 如果四个 NoFeel 仓库都是公开的，可以省略 `NOFEEL_REPOSITORIES_TOKEN`；当前组织
 策略关闭了 Deploy Key，私有仓库场景应保留它并同步到 OVH 的 root-only credential。
 个人 GHCR 推送使用 workflow 内置 `GITHUB_TOKEN`，无需另建 GHCR 写入 token。
 
-## `main` 与合作方触发权限
+## `main` 与双入口触发权限
 
 在个人仓库设置中完成：
 
@@ -192,19 +199,24 @@ Secrets：
    `.github/workflows/**`、`server/**`、`config/**`。
 4. `production` Environment 的 Deployment branches 设置为 `main`。
 5. 按需启用 Required reviewers；启用后每次生产部署会等待指定审核。
-6. 将允许触发的账号写入仓库变量 `ALLOWED_TRIGGER_ACTORS`，无需将其添加为
-   Collaborator。
-7. Workflow 的授权 job 只有 `issues: write`；部署 job 只有 `contents: read` 与
+6. 将允许从组织仓库触发的账号写入 `ALLOWED_TRIGGER_ACTORS`，无需将其添加为本
+   仓库 Collaborator。
+7. 将专用 GitHub App bot login 写入 `REMOTE_DISPATCH_ACTOR`。
+8. Workflow 的授权 job 只有 `actions: read`；部署 job 只有 `contents: read` 与
    `packages: write`，并单独挂载 `production` Environment。
 
-合作方使用仓库的 `New issue -> Production deployment` 表单，勾选确认后提交。
-符合白名单和固定表单的 Issue 会启动一次部署；成功、失败或取消后，工作流会回复
-运行结果并关闭 Issue。不在白名单中的账号创建 Issue 时只会执行关闭操作，不会进入
-构建 job，也不会读取任何生产 Secret。
+本仓库所有者可在 Actions 页面直接运行 `NoFeelCaptcha production deploy`，勾选
+`confirm_production`，并保持两个 Bridge input 为空。合作方则在
+`NoFeelCaptcha/nofeel-k8s-ci` 中运行 `Trigger NoFeelCaptcha production deploy`。
+
+远程请求必须同时满足：App 身份正确、来源仓库和 workflow 固定、来源分支为
+`main`、来源 run 仍在执行且创建不超过 15 分钟、真实 actor 位于
+`ALLOWED_TRIGGER_ACTORS`，并且该来源 run 尚未被使用。任一检查失败都不会进入
+`production` Environment。
 
 授权新账号只需将其完整 GitHub 用户名追加到 `ALLOWED_TRIGGER_ACTORS`，以英文逗号
-分隔。撤销时从变量中删除用户名即可，不涉及仓库成员权限。更新源代码版本仍由仓库
-所有者提交只修改 lock 文件的 Pull Request，审核后再创建部署 Issue。
+分隔。撤销时从变量中删除用户名即可，不涉及本仓库成员权限。更新源代码版本仍由
+仓库所有者提交只修改 lock 文件的 Pull Request，审核后再手动 Trigger。
 
 ## 首次无副作用测试
 
@@ -223,9 +235,9 @@ ssh -i $Key root@51.81.242.220 uname -a
 ssh -i $Key -L 15432:127.0.0.1:5432 root@51.81.242.220
 ```
 
-确认测试结果后，打开仓库 `Issues -> New issue -> Production deployment`，勾选
-唯一的生产确认项并提交。workflow 不接受源码 ref 输入，回滚需要由仓库所有者审核
-并修改 `config/nofeel-k8s.lock`，随后创建新的部署 Issue。
+确认测试结果后，仓库所有者可从本仓库 Actions 直接 Trigger；合作方从组织触发仓库
+Actions Trigger。两个入口都不接受源码 ref 输入。回滚需要由仓库所有者审核并修改
+`config/nofeel-k8s.lock`，随后重新手动 Trigger。
 
 ## 撤销与轮换
 
