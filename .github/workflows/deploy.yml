@@ -266,16 +266,16 @@ jobs:
           IMAGE_NAMESPACE: ${{ env.IMAGE_NAMESPACE }}
         run: bash scripts/build-and-push.sh
 
-      - name: Generate release manifest
+      - name: Render Kubernetes release manifests
         shell: bash
         env:
-          SOURCE_COMMIT: ${{ steps.images.outputs.source_commit }}
+          NOFEEL_ROOT: ${{ github.workspace }}/nofeel-k8s
           SERVER_IMAGE: ${{ steps.images.outputs.server }}
           RUNTIME_IMAGE: ${{ steps.images.outputs.runtime }}
           FRONTEND_IMAGE: ${{ steps.images.outputs.frontend }}
+          OUTPUT_DIR: ${{ runner.temp }}/nofeel-release
         run: |
-          bash scripts/make-release-manifest.sh > "$RUNNER_TEMP/nofeel-release.env"
-          cat "$RUNNER_TEMP/nofeel-release.env"
+          bash scripts/render-release.sh
 
       - name: Configure pinned SSH trust
         shell: bash
@@ -291,24 +291,19 @@ jobs:
           printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > "$HOME/.ssh/known_hosts"
           chmod 0600 "$HOME/.ssh/id_ed25519" "$HOME/.ssh/known_hosts"
 
-      - name: Send release manifest through forced command
+      - name: Deploy through standard SSH and kubectl
         shell: bash
         env:
           DEPLOY_HOST: ${{ vars.DEPLOY_HOST }}
           DEPLOY_USER: ${{ vars.DEPLOY_USER || 'root' }}
+          MANIFEST_DIR: ${{ runner.temp }}/nofeel-release
         run: |
-          set -euo pipefail
-          test -n "$DEPLOY_HOST"
-          test "$DEPLOY_USER" = root
-          ssh -T -o StrictHostKeyChecking=yes -o IdentitiesOnly=yes \
-            -o ConnectTimeout=10 -o ServerAliveInterval=15 -o ServerAliveCountMax=2 \
-            "$DEPLOY_USER@$DEPLOY_HOST" < "$RUNNER_TEMP/nofeel-release.env"
-          rm -f "$RUNNER_TEMP/nofeel-release.env"
+          bash scripts/deploy-via-ssh.sh
 
       - name: Cleanup runner temporary files
         if: ${{ always() }}
         shell: bash
-        run: rm -f "$RUNNER_TEMP/nofeel-release.env"
+        run: rm -rf "$RUNNER_TEMP/nofeel-release" "$HOME/.ssh/id_ed25519" "$HOME/.ssh/known_hosts"
 
       - name: Write deployment summary
         if: ${{ success() }}
@@ -328,7 +323,7 @@ jobs:
           - Runtime: `${{ steps.images.outputs.runtime }}`
           - Server: `${{ steps.images.outputs.server }}`
           - Frontend: `${{ steps.images.outputs.frontend }}`
-          - Target: OVH kubeadm control plane via pinned SSH host key
+          - Target: OVH kubeadm control plane via pinned SSH host key and existing kubectl
           EOF
 
   finalize:

@@ -19,18 +19,16 @@
 ## OVH SSH boundary
 
 - Existing account: `root`.
-- CI uses a separate public key entry with `restrict`, `no-user-rc`, and a fixed
-  `/usr/local/sbin/nofeel-ci-gateway` forced command.
-- The CI key cannot request a PTY, execute a command, use forwarding, or use scp/sftp.
-- The gateway accepts at most 8192 bytes from standard input.
-- The deployment helper is root-owned and reads only the fixed five-field manifest.
+- CI uses a separate public key entry with `restrict` and `no-user-rc`.
+- The CI key cannot request a PTY or use forwarding, but it can execute non-interactive
+  commands as root. Protecting the personal repository and `production` Environment is mandatory.
+- OVH stores no CI gateway, deployment helper, CI source checkout, or repository PAT.
+- The workflow uses the existing `/usr/bin/kubectl` and `/etc/kubernetes/admin.conf`.
 
 ## Source and image boundary
 
-- The server-side checkout uses a root-only fine-grained read credential because organization policy disables Deploy Keys.
-- The server fetches the requested `nofeel-k8s` commit and verifies it is an ancestor of protected `main`.
-- The helper never executes scripts received from GitHub Actions.
-- Generated overlays are temporary and are removed after every run.
+- The GitHub Runner checks out the requested `nofeel-k8s` commit and verifies it is an ancestor of protected `main`.
+- Generated overlays and rendered manifests are temporary and are removed after every run.
 - Only `ghcr.io/cong0707/*@sha256:<digest>` images are accepted.
 - The cluster pull token lives only in `secret/nofeel-ghcr`.
 
@@ -40,11 +38,10 @@ Before the first production run, verify:
 
 ```text
 requested nofeel-k8s commit is a 40-character hash on protected main
-invalid protocol manifest is rejected
-remote command execution is rejected
+rendered manifests use immutable personal GHCR digests
+the CI key can execute the required read-only kubectl check
 local and remote port forwarding are rejected
 nofeel-ghcr exists in namespace nofeel
-OVH can fetch nofeel-k8s with the read-only Deploy Key
 Environment secrets are present
 production Environment is restricted to main
 ```

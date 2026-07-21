@@ -23,7 +23,7 @@ jobs:
             .github/workflows/deploy.yml \
             .github/workflows/validate.yml \
             .github/ISSUE_TEMPLATE/deploy.yml
-          bash -n scripts/*.sh server/nofeel-ci-deploy server/nofeel-ci-gateway server/install-nofeel-ci.sh
+          bash -n scripts/*.sh
       - name: Validate Issue commit extraction
         shell: bash
         run: |
@@ -39,3 +39,5 @@ jobs:
           set -euo pipefail
           test ! -e config/nofeel-k8s.lock
           grep -Fq 'needs.authorize.outputs.source_commit' .github/workflows/deploy.yml
+          test ! -d server
+          ! grep -R -Fq 'nofeel-ci-gateway' README.md docs .github scripts
