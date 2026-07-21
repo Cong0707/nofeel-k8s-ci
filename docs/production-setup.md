@@ -3,17 +3,17 @@
 ## GitHub
 
 - Repository: `Cong0707/nofeel-k8s-ci`, public.
-- Trigger: `workflow_dispatch` only; there are no push, pull request, Issue, or schedule triggers.
-- Direct dispatch is restricted to the personal repository owner.
-- Remote dispatch is restricted to the configured GitHub App bot login.
-- The target reads the public organization workflow run and checks its real actor against the exact, case-insensitive `ALLOWED_TRIGGER_ACTORS` list.
+- Triggers: a newly opened deployment Issue, or an owner-only `workflow_dispatch` with explicit confirmation.
+- Comments and reopened Issues do not deploy; push, pull request, and schedule events are not configured.
+- `ALLOWED_TRIGGER_ACTORS` is parsed as an exact, case-insensitive comma-separated login list.
+- Accounts outside that list have their Issues closed before any environment or deployment Secret is available.
+- Direct `workflow_dispatch` checks the event sender against the personal repository owner and does not use the partner allowlist.
 - Source: `config/nofeel-k8s.lock`; no workflow input can select an arbitrary source ref.
 - `main` requires Pull Request review and CODEOWNER approval.
 - `production` Environment accepts deployments from `main` only.
 - `ALLOWED_TRIGGER_ACTORS` contains only the accounts that may start a manual run.
 - Workflow `GITHUB_TOKEN` has only `contents: read` and `packages: write`; it pushes personal GHCR images.
-- The authorization job has only `actions: read`; the production permissions and Environment are scoped to the deployment job.
-- The organization bridge has no production Secret and uses a GitHub App installed only on the personal CI repository with Actions read/write.
+- The authorization job has only `issues: write`; the production permissions and Environment are scoped to the deployment job.
 - `NOFEEL_REPOSITORIES_TOKEN` is read-only and limited to the required NoFeel repositories.
 
 ## OVH SSH boundary

@@ -1,11 +1,14 @@
 name: NoFeelCaptcha production deploy
 
 run-name: >-
-  ${{ inputs.source_repository == ''
-      && format('Direct deploy by {0}', github.actor)
-      || format('Deploy from {0} run {1}', inputs.source_repository, inputs.source_run_id) }}
+  ${{ github.event_name == 'issues'
+      && format('Deploy from {0} issue {1}', github.repository, github.event.issue.number)
+      || format('Direct deploy by {0}', github.actor) }}
 
 on:
+  issues:
+    types:
+      - opened
   workflow_dispatch:
     inputs:
       confirm_production:
@@ -13,16 +16,6 @@ on:
         required: true
         default: false
         type: boolean
-      source_repository:
-        description: Bridge only; leave empty for a direct owner deployment
-        required: false
-        default: ''
-        type: string
-      source_run_id:
-        description: Bridge only; leave empty for a direct owner deployment
-        required: false
-        default: ''
-        type: string
 
 permissions: {}
 
@@ -33,9 +26,12 @@ env:
 jobs:
   authorize:
     name: Authorize deployment request
+    if: >-
+      github.event_name != 'issues' ||
+      github.event.issue.pull_request == null
     runs-on: ubuntu-24.04
     permissions:
-      actions: read
+      issues: write
     outputs:
       authorized: ${{ steps.policy.outputs.authorized }}
       valid_request: ${{ steps.policy.outputs.valid_request }}
@@ -47,7 +43,6 @@ jobs:
         shell: bash
         env:
           ALLOWED_TRIGGER_ACTORS: ${{ vars.ALLOWED_TRIGGER_ACTORS }}
-          REMOTE_DISPATCH_ACTOR: ${{ vars.REMOTE_DISPATCH_ACTOR }}
           GH_TOKEN: ${{ github.token }}
         run: |
           set -Eeuo pipefail
@@ -56,17 +51,19 @@ jobs:
             printf '%s=%s\n' "$1" "$2" >> "$GITHUB_OUTPUT"
           }
 
-          actor_allowed() {
-            local actor="$1"
-            local candidate
-            IFS=',' read -r -a actors <<< "${ALLOWED_TRIGGER_ACTORS:-}"
-            for candidate in "${actors[@]}"; do
-              candidate="${candidate//[[:space:]]/}"
-              if [[ -n "$candidate" && "${candidate,,}" == "${actor,,}" ]]; then
-                return 0
-              fi
-            done
-            return 1
+          close_issue() {
+            local reason="$1"
+            local payload
+            payload="$(jq -cn --arg reason "$reason" \
+              '{state:"closed",state_reason:$reason}')"
+            curl --fail-with-body --silent --show-error \
+              --retry 3 --retry-all-errors \
+              --request PATCH \
+              --header 'Accept: application/vnd.github+json' \
+              --header "Authorization: Bearer ${GH_TOKEN}" \
+              --header 'X-GitHub-Api-Version: 2022-11-28' \
+              "https://api.github.com/repos/${GITHUB_REPOSITORY}/issues/${issue_number}" \
+              --data "$payload" >/dev/null
           }
 
           set_output authorized false
@@ -74,115 +71,61 @@ jobs:
           set_output trigger_actor unknown
           set_output trigger_source unknown
 
-          confirm_production="$(jq -r '(.inputs.confirm_production // false) | tostring' "$GITHUB_EVENT_PATH")"
-          source_repository="$(jq -r '.inputs.source_repository // ""' "$GITHUB_EVENT_PATH")"
-          source_run_id="$(jq -r '.inputs.source_run_id // ""' "$GITHUB_EVENT_PATH")"
-          dispatch_sender="$(jq -r '.sender.login // ""' "$GITHUB_EVENT_PATH")"
-
-          [[ "$confirm_production" == true ]] || {
-            echo 'production confirmation is required' >&2
-            exit 1
-          }
-
-          if [[ -z "$source_repository" && -z "$source_run_id" ]]; then
-            [[ "$dispatch_sender" == "$GITHUB_REPOSITORY_OWNER" ]] || {
+          if [[ "$GITHUB_EVENT_NAME" == workflow_dispatch ]]; then
+            actor="$(jq -r '.sender.login // ""' "$GITHUB_EVENT_PATH")"
+            confirmed="$(jq -r '(.inputs.confirm_production // false) | tostring' "$GITHUB_EVENT_PATH")"
+            [[ "$actor" == "$GITHUB_REPOSITORY_OWNER" ]] || {
               echo "direct deployment is restricted to ${GITHUB_REPOSITORY_OWNER}" >&2
+              exit 1
+            }
+            [[ "$confirmed" == true ]] || {
+              echo 'production confirmation is required' >&2
               exit 1
             }
             set_output authorized true
             set_output valid_request true
-            set_output trigger_actor "$dispatch_sender"
+            set_output trigger_actor "$actor"
             set_output trigger_source "${GITHUB_REPOSITORY} direct workflow_dispatch"
             exit 0
           fi
 
-          [[ -n "$source_repository" && -n "$source_run_id" ]] || {
-            echo 'remote source repository and run ID must be supplied together' >&2
-            exit 1
-          }
-          [[ -n "$REMOTE_DISPATCH_ACTOR" && "$dispatch_sender" == "$REMOTE_DISPATCH_ACTOR" ]] || {
-            echo 'remote dispatch sender is not the configured GitHub App' >&2
-            exit 1
-          }
-          [[ "$source_repository" == 'NoFeelCaptcha/nofeel-k8s-ci' ]] || {
-            echo 'remote dispatch source repository is not trusted' >&2
-            exit 1
-          }
-          [[ "$source_run_id" =~ ^[1-9][0-9]*$ ]] || {
-            echo 'remote dispatch source run ID is invalid' >&2
-            exit 1
-          }
+          actor="$(jq -r '.issue.user.login' "$GITHUB_EVENT_PATH")"
+          issue_title="$(jq -r '.issue.title' "$GITHUB_EVENT_PATH")"
+          issue_body="$(jq -r '.issue.body // ""' "$GITHUB_EVENT_PATH")"
+          issue_body="${issue_body//$'\r'/}"
+          issue_number="$(jq -r '.issue.number' "$GITHUB_EVENT_PATH")"
 
-          source_run="$(curl --fail-with-body --silent --show-error \
-            --retry 3 --retry-all-errors \
-            --header 'Accept: application/vnd.github+json' \
-            --header 'X-GitHub-Api-Version: 2022-11-28' \
-            "https://api.github.com/repos/${source_repository}/actions/runs/${source_run_id}")"
-          actor="$(jq -r '.actor.login // ""' <<< "$source_run")"
-          source_event="$(jq -r '.event // ""' <<< "$source_run")"
-          source_branch="$(jq -r '.head_branch // ""' <<< "$source_run")"
-          source_path="$(jq -r '.path // ""' <<< "$source_run")"
-          source_status="$(jq -r '.status // ""' <<< "$source_run")"
-          source_created_at="$(jq -r '.created_at // ""' <<< "$source_run")"
-          source_repo_actual="$(jq -r '.repository.full_name // ""' <<< "$source_run")"
-
-          [[ "$source_repo_actual" == "$source_repository" ]] || {
-            echo 'source run repository does not match' >&2
-            exit 1
-          }
-          [[ "$source_event" == workflow_dispatch ]] || {
-            echo 'source run was not manually dispatched' >&2
-            exit 1
-          }
-          [[ "$source_branch" == main ]] || {
-            echo 'source run did not use protected main' >&2
-            exit 1
-          }
-          [[ "$source_path" == '.github/workflows/trigger.yml' ]] || {
-            echo 'source run used an unexpected workflow' >&2
-            exit 1
-          }
-          [[ "$source_status" == queued || "$source_status" == in_progress ]] || {
-            echo 'source run is no longer active' >&2
-            exit 1
-          }
-          actor_allowed "$actor" || {
-            echo "source actor ${actor} is not in ALLOWED_TRIGGER_ACTORS" >&2
-            exit 1
-          }
-
-          now_epoch="$(date -u +%s)"
-          source_epoch="$(date -u -d "$source_created_at" +%s)"
-          age_seconds="$((now_epoch - source_epoch))"
-          (( age_seconds >= -60 && age_seconds <= 900 )) || {
-            echo 'source workflow run is outside the 15-minute authorization window' >&2
-            exit 1
-          }
-
-          expected_title="Deploy from ${source_repository} run ${source_run_id}"
-          first_matching_run=''
-          for _ in 1 2 3 4 5; do
-            target_runs="$(curl --fail-with-body --silent --show-error \
-              --retry 3 --retry-all-errors \
-              --header 'Accept: application/vnd.github+json' \
-              --header "Authorization: Bearer ${GH_TOKEN}" \
-              --header 'X-GitHub-Api-Version: 2022-11-28' \
-              "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/workflows/deploy.yml/runs?event=workflow_dispatch&per_page=100")"
-            first_matching_run="$(jq -r --arg title "$expected_title" \
-              '[.workflow_runs[] | select(.display_title == $title) | .id] | min // empty' \
-              <<< "$target_runs")"
-            [[ -n "$first_matching_run" ]] && break
-            sleep 2
+          allowed=0
+          IFS=',' read -r -a actors <<< "${ALLOWED_TRIGGER_ACTORS:-}"
+          for candidate in "${actors[@]}"; do
+            candidate="${candidate//[[:space:]]/}"
+            if [[ -n "$candidate" && "${candidate,,}" == "${actor,,}" ]]; then
+              allowed=1
+              break
+            fi
           done
-          [[ "$first_matching_run" == "$GITHUB_RUN_ID" ]] || {
-            echo 'source workflow run was already used or could not be claimed' >&2
-            exit 1
-          }
 
+          if (( allowed != 1 )); then
+            echo "Closing unauthorized deployment issue from ${actor}."
+            close_issue not_planned
+            exit 0
+          fi
           set_output authorized true
+
+          expected_title='[Deploy] NoFeelCaptcha production'
+          expected_confirmation_lower='- [x] I confirm that this Issue may build and roll out the locked version to production.'
+          expected_confirmation_upper='- [X] I confirm that this Issue may build and roll out the locked version to production.'
+          if [[ "$issue_title" != "$expected_title" ]] || \
+             { ! grep -Fqx -- "$expected_confirmation_lower" <<< "$issue_body" && \
+               ! grep -Fqx -- "$expected_confirmation_upper" <<< "$issue_body"; }; then
+            echo 'Closing an authorized issue that does not match the deployment form.'
+            close_issue not_planned
+            exit 0
+          fi
+
           set_output valid_request true
           set_output trigger_actor "$actor"
-          set_output trigger_source "${source_repository} run ${source_run_id}"
+          set_output trigger_source "${GITHUB_REPOSITORY} issue ${issue_number}"
 
   build-and-deploy:
     name: Build, publish and roll out NoFeelCaptcha
@@ -359,3 +302,65 @@ jobs:
           - Frontend: `${{ steps.images.outputs.frontend }}`
           - Target: OVH kubeadm control plane via pinned SSH host key
           EOF
+
+  finalize:
+    name: Report result and close deployment issue
+    needs:
+      - authorize
+      - build-and-deploy
+    if: >-
+      always() &&
+      github.event_name == 'issues' &&
+      needs.authorize.outputs.authorized == 'true' &&
+      needs.authorize.outputs.valid_request == 'true'
+    runs-on: ubuntu-24.04
+    permissions:
+      issues: write
+    steps:
+      - name: Comment result and close issue
+        shell: bash
+        env:
+          DEPLOY_RESULT: ${{ needs.build-and-deploy.result }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -Eeuo pipefail
+          issue_number="$(jq -r '.issue.number' "$GITHUB_EVENT_PATH")"
+          run_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          case "$DEPLOY_RESULT" in
+            success)
+              message="Production deployment completed successfully. [View workflow run](${run_url})."
+              reason=completed
+              ;;
+            failure)
+              message="Production deployment failed. [View workflow run](${run_url}) and open a new deployment Issue after the failure is resolved."
+              reason=not_planned
+              ;;
+            cancelled)
+              message="Production deployment was cancelled. [View workflow run](${run_url}). Open a new deployment Issue to retry."
+              reason=not_planned
+              ;;
+            *)
+              message="Production deployment did not run (result: ${DEPLOY_RESULT}). [View workflow run](${run_url})."
+              reason=not_planned
+              ;;
+          esac
+
+          comment_payload="$(jq -cn --arg body "$message" '{body:$body}')"
+          close_payload="$(jq -cn --arg reason "$reason" \
+            '{state:"closed",state_reason:$reason}')"
+          curl --fail-with-body --silent --show-error \
+            --retry 3 --retry-all-errors \
+            --request POST \
+            --header 'Accept: application/vnd.github+json' \
+            --header "Authorization: Bearer ${GH_TOKEN}" \
+            --header 'X-GitHub-Api-Version: 2022-11-28' \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/issues/${issue_number}/comments" \
+            --data "$comment_payload" >/dev/null
+          curl --fail-with-body --silent --show-error \
+            --retry 3 --retry-all-errors \
+            --request PATCH \
+            --header 'Accept: application/vnd.github+json' \
+            --header "Authorization: Bearer ${GH_TOKEN}" \
+            --header 'X-GitHub-Api-Version: 2022-11-28' \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/issues/${issue_number}" \
+            --data "$close_payload" >/dev/null
