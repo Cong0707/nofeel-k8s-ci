@@ -1,0 +1,41 @@
+name: Validate deployment policy
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+      - name: Validate YAML and shell syntax
+        shell: bash
+        run: |
+          set -euo pipefail
+          ruby -e 'require "yaml"; ARGV.each { |path| YAML.load_file(path, aliases: true) }' \
+            .github/workflows/deploy.yml \
+            .github/workflows/validate.yml \
+            .github/ISSUE_TEMPLATE/deploy.yml
+          bash -n scripts/*.sh server/nofeel-ci-deploy server/nofeel-ci-gateway server/install-nofeel-ci.sh
+      - name: Validate Issue commit extraction
+        shell: bash
+        run: |
+          set -euo pipefail
+          expected=0123456789abcdef0123456789abcdef01234567
+          issue_body="$(printf '### nofeel-k8s commit\n\n%s\n\n### Production confirmation\n\n- [x] I confirm that this Issue may build and roll out the selected commit to production.\n' "$expected")"
+          actual="$(awk '$0 == "### nofeel-k8s commit" { found=1; next } found && NF { print; exit }' <<< "$issue_body")"
+          test "$actual" = "$expected"
+          [[ "$actual" =~ ^[0-9a-f]{40}$ ]]
+      - name: Reject mutable source locks
+        shell: bash
+        run: |
+          set -euo pipefail
+          test ! -e config/nofeel-k8s.lock
+          grep -Fq 'needs.authorize.outputs.source_commit' .github/workflows/deploy.yml

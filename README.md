@@ -1,8 +1,8 @@
 # nofeel-k8s-ci
 
 `nofeel-k8s-ci` 是 NoFeelCaptcha 的公开 CI 仓库。白名单用户通过一次性部署
-Issue 触发，仓库所有者也可以从 Actions 页面直接 Trigger。两种入口都会构建已经
-锁定的 `nofeel-k8s` 源码和组件，推送不可变 GHCR 镜像，然后通过 OVH 上的固定
+Issue 触发，仓库所有者也可以从 Actions 页面直接 Trigger。两种入口都要求指定
+`nofeel-k8s` 的完整 commit，构建该提交及其组件，推送不可变 GHCR 镜像，然后通过 OVH 上的固定
 部署入口更新 Kubernetes。Issue 入口完成后会写入结果并自动关闭该 Issue。
 
 ## 部署边界
@@ -16,8 +16,8 @@ Issue 触发，仓库所有者也可以从 Actions 页面直接 Trigger。两种
 - `workflow_dispatch` 只接受仓库所有者 `Cong0707`，并要求显式勾选生产确认。
 - 授权门禁不使用 `production` Environment，也读取不到部署 Secret；只有门禁通过
   后的 job 才能使用生产 Environment。
-- 源码版本来自 `config/nofeel-k8s.lock`，触发时不能通过输入参数替换。
-- 只有提交到受保护 `main` 的锁定版本才会进入生产流程。
+- Issue 表单和 `workflow_dispatch` 都必须填写 40 位 `nofeel-k8s` commit。
+- CI 与服务器都会确认该 commit 属于 `nofeel-k8s` 受保护 `main` 的历史。
 - GHCR 镜像使用 `ghcr.io/cong0707/*@sha256:...`，不使用 `latest`。
 - OVH 只接受五行固定 manifest，不接受远程 Shell 命令、脚本或文件上传。
 - SSH 使用现有 `root` 账户中的专用 forced-command 公钥，不创建额外 Linux 用户。
@@ -26,7 +26,7 @@ Issue 触发，仓库所有者也可以从 Actions 页面直接 Trigger。两种
 
 合作方不需要成为仓库 Collaborator，也不需要 `Write` 权限。公开仓库允许其提交
 部署 Issue，工作流再用 `ALLOWED_TRIGGER_ACTORS` 做大小写不敏感的完整用户名
-匹配。Issue 不能选择源码分支、标签或 commit，每个新 Issue 只触发一次，重新打开
+匹配。Issue 只能选择完整 commit，不能选择源码分支或标签，每个新 Issue 只触发一次，重新打开
 或评论都不会重新部署。
 
 ## 工作流
@@ -34,7 +34,7 @@ Issue 触发，仓库所有者也可以从 Actions 页面直接 Trigger。两种
 ```text
 打开并确认一次性部署 Issue，或由仓库所有者直接 Trigger
   -> 校验 ALLOWED_TRIGGER_ACTORS/Issue 表单或所有者身份
-  -> 锁定 commit
+  -> 校验指定 commit 属于 nofeel-k8s/main
   -> checkout nofeel-k8s 与组件
   -> 验证 Kustomize 和构建输入
   -> 构建 server/browser-assets/runtime/frontend
@@ -43,9 +43,8 @@ Issue 触发，仓库所有者也可以从 Actions 页面直接 Trigger。两种
   -> OVH 执行 state -> migration -> app rollout
 ```
 
-生产服务器不会执行收到的脚本。服务器上的部署程序会从个人 CI 仓库受保护的
-`main` 重新读取 `config/nofeel-k8s.lock`，确认 manifest 中的 commit 完全一致，
-再使用 root-only 的只读 GitHub 凭据取得源码并在本地生成临时 Kustomize overlay；部署
+生产服务器不会执行收到的脚本。服务器上的部署程序会使用 root-only 的只读 GitHub 凭据
+取得 manifest 指定的 `nofeel-k8s` commit，并再次确认它属于远端受保护 `main`，再在本地生成临时 Kustomize overlay；部署
 结束后删除生成目录。
 
 ## 一次性配置
@@ -165,7 +164,7 @@ Secrets：
 | --- | --- |
 | `DEPLOY_SSH_PRIVATE_KEY` | 第 1 步生成的完整 CI 私钥 |
 | `DEPLOY_KNOWN_HOSTS` | 第 6 步核对后的完整 host key 行 |
-| `NOFEEL_REPOSITORIES_TOKEN` | 可读取 `nofeel-k8s`、`nofeel-server`、`nofeel-browser`、`nofeel-frontend` 的 fine-grained PAT |
+| `NOFEEL_REPOSITORIES_TOKEN` | 可读取 `nofeel-k8s`、`nofeel-server`、`nofeel-browser`、`nofeel-widget`、`nofeel-frontend` 的 fine-grained PAT |
 
 添加以下 Environment Variables：
 
@@ -205,11 +204,11 @@ Secrets：
 构建 job，也不会读取任何生产 Secret。
 
 授权新账号只需将其完整 GitHub 用户名追加到 `ALLOWED_TRIGGER_ACTORS`，以英文逗号
-分隔。撤销时从变量中删除用户名即可，不涉及仓库成员权限。更新源代码版本仍由仓库
-所有者提交只修改 lock 文件的 Pull Request，审核后再创建部署 Issue。
+分隔。撤销时从变量中删除用户名即可，不涉及仓库成员权限。部署新版本前先完成对应
+Pull Request 审查，合并后再在部署 Issue 或 Actions 表单中填写目标 commit。
 
 仓库所有者也可以在 `Actions -> NoFeelCaptcha production deploy -> Run workflow`
-中直接运行，勾选 `confirm_production` 后提交。该入口不使用合作方白名单，只校验
+中直接运行，填写 `source_commit`、勾选 `confirm_production` 后提交。该入口不使用合作方白名单，只校验
 GitHub 事件中的真实 sender 必须是 `Cong0707`。
 
 ## 首次无副作用测试
@@ -230,8 +229,7 @@ ssh -i $Key -L 15432:127.0.0.1:5432 root@51.81.242.220
 ```
 
 确认测试结果后，可以提交 `Production deployment` Issue，或由仓库所有者在 Actions
-中直接 Trigger。workflow 不接受源码 ref 输入，回滚需要由仓库所有者审核并修改
-`config/nofeel-k8s.lock`，随后使用任一入口重新触发。
+中直接 Trigger，并填写目标 commit。回滚时选择之前已验证的 commit，随后重新触发。
 
 ## 撤销与轮换
 

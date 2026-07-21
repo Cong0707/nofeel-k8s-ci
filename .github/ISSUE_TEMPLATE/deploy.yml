@@ -1,19 +1,27 @@
 name: Production deployment
-description: Build and roll out the locked NoFeelCaptcha version to production
+description: Build and roll out an exact nofeel-k8s commit to production
 title: "[Deploy] NoFeelCaptcha production"
 body:
   - type: markdown
     attributes:
       value: |
-        Opening this Issue starts one production deployment. The locked source
-        version in `config/nofeel-k8s.lock` is used; this form cannot select a
-        branch, tag, or commit. The workflow posts its result and closes this
-        Issue when the attempt finishes.
+        Opening this Issue starts one production deployment. Enter the full
+        40-character commit from `NoFeelCaptcha/nofeel-k8s` protected `main`.
+        The workflow posts its result and closes this Issue when the attempt finishes.
+
+  - type: input
+    id: source_commit
+    attributes:
+      label: nofeel-k8s commit
+      description: Full 40-character commit hash from protected main
+      placeholder: 0123456789abcdef0123456789abcdef01234567
+    validations:
+      required: true
 
   - type: checkboxes
     id: production-confirmation
     attributes:
       label: Production confirmation
       options:
-        - label: I confirm that this Issue may build and roll out the locked version to production.
+        - label: I confirm that this Issue may build and roll out the selected commit to production.
           required: true
